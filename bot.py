@@ -3,6 +3,7 @@ import json
 import random
 import logging
 import os
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -16,20 +17,14 @@ import db
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Чтение токена из переменной окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    print("ВНИМАНИЕ: BOT_TOKEN не установлен. Экспорт переменной среды обязателен.")
 
-# Загрузка базы вопросов
 with open('questions.json', 'r', encoding='utf-8') as f:
     QUESTIONS = json.load(f)
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN if BOT_TOKEN else "DUMMY_TOKEN")
 dp = Dispatcher(storage=MemoryStorage())
 
-# Клавиатура главного меню
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🎫 Тянуть билет")],
@@ -38,11 +33,8 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Состояния FSM
 class TicketState(StatesGroup):
     answering = State()
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_question_inline_kb(hint_used=False, answer_shown=False):
     kb = []
@@ -63,7 +55,6 @@ async def send_next_question(message_or_call, state: FSMContext):
     questions_list = data['questions_list']
     
     if q_index >= len(questions_list):
-        # Билет завершен
         correct_count = data['correct_in_ticket']
         is_ideal = (correct_count == len(questions_list))
         user_id = message_or_call.from_user.id
@@ -85,17 +76,13 @@ async def send_next_question(message_or_call, state: FSMContext):
     q_data = questions_list[q_index]
     text = f"<b>Вопрос {q_index + 1}/5</b>\n\n{q_data['question']}"
     
-    # Обновляем состояние (сбрасываем статус подсказки для нового вопроса)
     await state.update_data(current_hint_used=False)
-    
     kb = get_question_inline_kb()
     
     if isinstance(message_or_call, CallbackQuery):
         await message_or_call.message.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
         await message_or_call.answer(text, reply_markup=kb, parse_mode="HTML")
-
-# --- ОБРАБОТЧИКИ ---
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
@@ -127,9 +114,7 @@ async def show_stats(message: Message):
 
 @dp.message(F.text == "🎫 Тянуть билет")
 async def start_ticket(message: Message, state: FSMContext):
-    # Выбираем 5 случайных вопросов
     ticket_questions = random.sample(QUESTIONS, 5)
-    
     await state.set_state(TicketState.answering)
     await state.update_data(
         questions_list=ticket_questions,
@@ -137,7 +122,6 @@ async def start_ticket(message: Message, state: FSMContext):
         correct_in_ticket=0,
         current_hint_used=False
     )
-    
     await message.answer("🎟 <b>Новый билет вытянут! Поехали:</b>", parse_mode="HTML")
     await send_next_question(message, state)
 
@@ -145,12 +129,9 @@ async def start_ticket(message: Message, state: FSMContext):
 async def process_hint(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     q_data = data['questions_list'][data['current_q_index']]
-    
     await state.update_data(current_hint_used=True)
-    
     text = f"<b>Вопрос {data['current_q_index'] + 1}/5</b>\n\n{q_data['question']}\n\n<i>{q_data['hint']}</i>"
     kb = get_question_inline_kb(hint_used=True, answer_shown=False)
-    
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -159,10 +140,8 @@ async def process_show_answer(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     q_data = data['questions_list'][data['current_q_index']]
     hint_used = data['current_hint_used']
-    
     text = f"<b>Вопрос {data['current_q_index'] + 1}/5</b>\n\n{q_data['question']}\n\n<b>Ответ:</b> {q_data['answer']}"
     kb = get_question_inline_kb(hint_used=hint_used, answer_shown=True)
-    
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -173,32 +152,43 @@ async def process_answer_result(callback: CallbackQuery, state: FSMContext):
     hint_used = data['current_hint_used']
     user_id = callback.from_user.id
     
-    # Записываем результат вопроса в БД
     await db.record_question_result(user_id, is_correct, hint_used)
     
-    # Обновляем прогресс билета
     correct_in_ticket = data['correct_in_ticket']
-    if is_correct:
-        correct_in_ticket += 1
+    if is_correct: correct_in_ticket += 1
         
-    await state.update_data(
-        current_q_index=data['current_q_index'] + 1,
-        correct_in_ticket=correct_in_ticket
-    )
+    await state.update_data(current_q_index=data['current_q_index'] + 1, correct_in_ticket=correct_in_ticket)
     
-    # Редактируем сообщение, чтобы убрать кнопки оценки
     old_text = callback.message.html_text
     result_emoji = "✅" if is_correct else "❌"
     await callback.message.edit_text(f"{old_text}\n\n<i>Твой ответ: {result_emoji}</i>", parse_mode="HTML")
-    
-    # Отправляем следующий вопрос
     await send_next_question(callback, state)
     await callback.answer()
+
+# --- ФИКТИВНЫЙ ВЕБ-СЕРВЕР ДЛЯ ОБХОДА ПРАВИЛ RENDER ---
+async def health_check(request):
+    return web.Response(text="Bot is running smoothly!")
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render автоматически задает порт в переменной окружения PORT
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Dummy web server started on port {port}")
 
 async def main():
     await db.init_db()
     if not BOT_TOKEN:
+        logging.error("BOT_TOKEN не найден. Остановка.")
         return
+        
+    # Запускаем фиктивный сервер, чтобы Render думал, что это веб-сайт
+    await start_dummy_server()
+    # Запускаем самого бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
